@@ -66,7 +66,9 @@ description = "random character is valid"
 [2ca77b9b-c099-46c3-a02c-0d0f68ffa0fe]
 description = "each ability is only calculated once"
 include = false
+comment = "Superseded canonical UUID: the replacement case below reimplements this behavior. The Java reference stores all six rolled abilities in fields during construction, and the getters return those stored values; see DnDCharacterTest.testEachAbilityIsOnlyCalculatedOnce."
 
 [dca2b2ec-f729-4551-84b9-078876bb4808]
 description = "each ability is only calculated once"
 reimplements = "2ca77b9b-c099-46c3-a02c-0d0f68ffa0fe"
+comment = "Replacement for the superseded UUID above. It covers the same cached-ability behavior; the old UUID is excluded to prevent duplicate canonical coverage, not because Java lacks this behavior."
