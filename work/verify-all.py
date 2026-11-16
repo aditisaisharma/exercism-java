@@ -1,28 +1,30 @@
 #!/usr/bin/env python3
-"""Run R58-T012..T020 checks in isolated worktrees and push their result evidence."""
+"""Run all R58 task checks, push evidence, and submit PRs when GitHub CLI is ready."""
 from __future__ import annotations
 
 import json
-import os
 import platform
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
 
+BASE_REPO = "S-AI-Projects/exercism-java"
+HEAD_REPO = "aditisaisharma/exercism-java"
+REVIEWER = "ankushbisht01"
 TASKS = [
-    ("R58-T012", "exercises/practice/ocr-numbers"),
-    ("R58-T013", "exercises/practice/variable-length-quantity"),
-    ("R58-T014", "exercises/practice/connect"),
-    ("R58-T015", "exercises/practice/luhn"),
-    ("R58-T016", "exercises/practice/rotational-cipher"),
-    ("R58-T017", "exercises/practice/raindrops"),
-    ("R58-T018", "exercises/practice/largest-series-product"),
-    ("R58-T019", "exercises/practice/run-length-encoding"),
-    ("R58-T020", "exercises/practice/circular-buffer"),
+    ("R58-T012", 12, "exercises/practice/ocr-numbers", "R58-T012: Document and verify OCR test metadata mapping"),
+    ("R58-T013", 13, "exercises/practice/variable-length-quantity", "R58-T013: Prove the VLQ seven-bit boundary with mutation testing"),
+    ("R58-T014", 14, "exercises/practice/connect", "R58-T014: Clarify Connect dimensions and winning-direction invariants"),
+    ("R58-T015", 15, "exercises/practice/luhn", "R58-T015: Document Luhn complexity and reproducible scaling measurements"),
+    ("R58-T016", 16, "exercises/practice/rotational-cipher", "R58-T016: Compare rotational-cipher arithmetic and alphabet lookup"),
+    ("R58-T017", 17, "exercises/practice/raindrops", "R58-T017: Add Java modulo guidance for Raindrops"),
+    ("R58-T018", 18, "exercises/practice/largest-series-product", "R58-T018: Validate Largest Series Product metadata file paths"),
+    ("R58-T019", 19, "exercises/practice/run-length-encoding", "R58-T019: Add an isolated Run Length Encoding reference runner"),
+    ("R58-T020", 20, "exercises/practice/circular-buffer", "R58-T020: Explain circular-buffer overwrite and clear contracts"),
 ]
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -39,6 +41,80 @@ def tool_version(args, cwd):
     return result.stdout.strip() or f"exit code {result.returncode}"
 
 
+def submit_with_gh(branch, issue, title, worktree):
+    gh = shutil.which("gh")
+    compare_url = f"https://github.com/{BASE_REPO}/compare/main...{HEAD_REPO.split('/')[0]}:{branch}?expand=1"
+    if not gh:
+        return {"status": "MANUAL_REQUIRED", "compare_url": compare_url,
+                "reason": "GitHub CLI (gh) is not installed"}
+    auth = command([gh, "auth", "status"], cwd=worktree, check=False)
+    if auth.returncode:
+        return {"status": "MANUAL_REQUIRED", "compare_url": compare_url,
+                "reason": "GitHub CLI is not authenticated", "detail": auth.stdout[-1500:]}
+
+    listing = command([gh, "pr", "list", "--repo", BASE_REPO, "--head",
+                       f"{HEAD_REPO.split('/')[0]}:{branch}", "--state", "open",
+                       "--json", "number,url"], cwd=worktree, check=False)
+    if listing.returncode:
+        return {"status": "MANUAL_REQUIRED", "compare_url": compare_url,
+                "reason": "Could not check for an existing PR", "detail": listing.stdout[-1500:]}
+    existing = json.loads(listing.stdout or "[]")
+    body_file = worktree / "work" / branch / "PR_DESCRIPTION.md"
+    if not body_file.is_file():
+        return {"status": "MANUAL_REQUIRED", "compare_url": compare_url,
+                "reason": f"Missing PR description file: {body_file}"}
+
+    if existing:
+        pr_number = existing[0]["number"]
+        pr_url = existing[0]["url"]
+        edit = command([gh, "pr", "edit", str(pr_number), "--repo", BASE_REPO,
+                        "--title", title, "--body-file", str(body_file)], cwd=worktree, check=False)
+        if edit.returncode:
+            return {"status": "MANUAL_REQUIRED", "pr_url": pr_url,
+                    "reason": "Could not update existing PR description", "detail": edit.stdout[-1500:]}
+    else:
+        created = command([gh, "pr", "create", "--repo", BASE_REPO,
+                           "--head", f"{HEAD_REPO.split('/')[0]}:{branch}",
+                           "--base", "main", "--title", title,
+                           "--body-file", str(body_file)], cwd=worktree, check=False)
+        if created.returncode:
+            return {"status": "MANUAL_REQUIRED", "compare_url": compare_url,
+                    "reason": "GitHub CLI could not create the PR", "detail": created.stdout[-1500:]}
+        pr_url = next((line.strip() for line in created.stdout.splitlines()
+                       if line.strip().startswith("https://github.com/")), "")
+        if not pr_url:
+            return {"status": "MANUAL_REQUIRED", "compare_url": compare_url,
+                    "reason": "PR creation returned no URL", "detail": created.stdout[-1500:]}
+        pr_number = int(pr_url.rstrip("/").split("/")[-1])
+
+    review = command([gh, "pr", "edit", str(pr_number), "--repo", BASE_REPO,
+                      "--add-reviewer", REVIEWER], cwd=worktree, check=False)
+    review_status = "REQUESTED" if review.returncode == 0 else "MANUAL_REQUIRED"
+
+    comments = command([gh, "issue", "view", str(issue), "--repo", BASE_REPO,
+                        "--json", "comments"], cwd=worktree, check=False)
+    comment_status = "PENDING"
+    if comments.returncode == 0:
+        try:
+            known = json.loads(comments.stdout).get("comments", [])
+            already_linked = any(pr_url in item.get("body", "") for item in known)
+        except (ValueError, TypeError):
+            already_linked = False
+        if already_linked:
+            comment_status = "ALREADY_LINKED"
+        else:
+            posted = command([gh, "issue", "comment", str(issue), "--repo", BASE_REPO,
+                              "--body", f"Implementation and verification submitted: {pr_url}"],
+                             cwd=worktree, check=False)
+            comment_status = "POSTED" if posted.returncode == 0 else "MANUAL_REQUIRED"
+    else:
+        comment_status = "MANUAL_REQUIRED"
+
+    return {"status": "PR_CREATED_OR_FOUND", "pr_number": pr_number, "pr_url": pr_url,
+            "review_request": review_status, "issue_link": comment_status,
+            "compare_url": compare_url}
+
+
 def main():
     old_summary = ROOT / "work" / "batch-verification-summary.json"
     if old_summary.exists():
@@ -47,14 +123,14 @@ def main():
     if status:
         raise RuntimeError("Your working tree is not clean. Commit or stash changes before running the batch verifier.")
     remote = command(["git", "remote", "get-url", "origin"]).stdout.strip()
-    if "aditisaisharma/exercism-java" not in remote:
-        raise RuntimeError(f"Expected origin to be your fork aditisaisharma/exercism-java, got: {remote}")
+    if HEAD_REPO not in remote:
+        raise RuntimeError(f"Expected origin to be your fork {HEAD_REPO}, got: {remote}")
 
     results = []
     failures = []
     with tempfile.TemporaryDirectory(prefix="r58-batch-worktrees-") as temporary:
         temp_root = Path(temporary)
-        for branch, exercise in TASKS:
+        for branch, issue, exercise, title in TASKS:
             worktree = temp_root / branch
             print(f"\n===== {branch} =====", flush=True)
             try:
@@ -93,8 +169,13 @@ def main():
                     raise RuntimeError(f"{branch} produced no new verification evidence to commit")
                 command(["git", "commit", "-m", f"Record {branch} verification evidence"], cwd=worktree)
                 command(["git", "push", "origin", f"HEAD:refs/heads/{branch}"], cwd=worktree)
-                results.append({"task": branch, "status": "PASS", "evidence": relative})
-                print(f"RESULT: {branch} PASS and evidence pushed.", flush=True)
+
+                submission = submit_with_gh(branch, issue, title, worktree)
+                task_result = {"task": branch, "status": "PASS",
+                               "evidence": relative, "submission": submission}
+                results.append(task_result)
+                print(f"RESULT: {branch} PASS; evidence pushed; submission={submission['status']}.",
+                      flush=True)
             except Exception as error:
                 failures.append({"task": branch, "error": str(error)})
                 print(f"RESULT: {branch} FAILED: {error}", file=sys.stderr, flush=True)
@@ -111,7 +192,11 @@ def main():
     print(json.dumps(summary, indent=2))
     if failures:
         raise SystemExit(1)
-    print("ALL NINE TASK CHECKS PASSED. Verification evidence was committed and pushed to each task branch.")
+    print("ALL NINE TASK CHECKS PASSED. Evidence was pushed to each task branch.")
+    if shutil.which("gh"):
+        print("GitHub CLI submission actions are included above. Check any MANUAL_REQUIRED statuses.")
+    else:
+        print("GitHub CLI was not available. Use the compare URLs and PR_DESCRIPTION.md files to submit the nine PRs.")
 
 
 if __name__ == "__main__":
