@@ -40,6 +40,9 @@ def tool_version(args, cwd):
 
 
 def main():
+    old_summary = ROOT / "work" / "batch-verification-summary.json"
+    if old_summary.exists():
+        old_summary.unlink()
     status = command(["git", "status", "--porcelain"]).stdout.strip()
     if status:
         raise RuntimeError("Your working tree is not clean. Commit or stash changes before running the batch verifier.")
