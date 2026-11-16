@@ -51,6 +51,11 @@ def submit_with_gh(branch, issue, title, worktree):
     if auth.returncode:
         return {"status": "MANUAL_REQUIRED", "compare_url": compare_url,
                 "reason": "GitHub CLI is not authenticated", "detail": auth.stdout[-1500:]}
+    account = command([gh, "api", "user", "--jq", ".login"], cwd=worktree, check=False)
+    if account.returncode or account.stdout.strip() != HEAD_REPO.split("/")[0]:
+        return {"status": "MANUAL_REQUIRED", "compare_url": compare_url,
+                "reason": f"Authenticate gh as {HEAD_REPO.split('/')[0]} before PR creation",
+                "detail": account.stdout[-1000:]}
 
     listing = command([gh, "pr", "list", "--repo", BASE_REPO, "--head",
                        f"{HEAD_REPO.split('/')[0]}:{branch}", "--state", "open",
